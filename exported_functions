@@ -34,5 +34,6 @@
 "_sqlite3_result_double",
 "_sqlite3_result_null",
 "_sqlite3_result_text",
-"_RegisterExtensionFunctions"
+"_RegisterExtensionFunctions",
+"_sqlite3_aggregate_context"
 ]

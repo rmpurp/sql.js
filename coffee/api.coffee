@@ -244,6 +244,7 @@ class Database
         @db = getValue(apiTemp, 'i32')
         RegisterExtensionFunctions(@db)
         @statements = {} # A list of all prepared statements of the database
+        @function_map = {} # A list of function pointers to functions
 
     ### Execute an SQL query, ignoring the rows it returns.
 
@@ -479,4 +480,90 @@ class Database
         # Generate a pointer to the wrapped, user defined function, and register with SQLite.
         func_ptr = addFunction(wrapped_func)
         @handleError sqlite3_create_function_v2 @db, name, func.length, SQLite.UTF8, 0, func_ptr, 0, 0, 0
+        return @
+    
+    'create_aggregate': (name, step, final) ->
+        make_state_function = ->
+            state = []
+            get_state = -> state
+
+            return get_state
+
+        wrapped_step = (cx, argc, argv) =>
+            # Parse the args from sqlite into JS objects
+            args = []
+            for i in [0...argc]
+                value_ptr = getValue(argv+(4*i), 'i32')
+                value_type = sqlite3_value_type(value_ptr)
+                data_func = switch
+                    when value_type == 1 then sqlite3_value_int
+                    when value_type == 2 then sqlite3_value_double
+                    when value_type == 3 then sqlite3_value_text
+                    when value_type == 4 then (ptr) ->
+                        size = sqlite3_value_bytes(ptr)
+                        blob_ptr = sqlite3_value_blob(ptr)
+                        blob_arg = new Uint8Array(size)
+                        blob_arg[j] = HEAP8[blob_ptr+j] for j in [0 ... size]
+                        blob_arg
+                    else (ptr) -> null
+
+                arg = data_func(value_ptr)
+                args.push arg
+                
+            state_func_ptr = _sqlite3_aggregate_context(cx, 4)
+            index = getValue(state_func_ptr, 'i32')
+
+            if index == 0
+                get_state = make_state_function()
+                index = addFunction(get_state)
+                @function_map[index] = get_state
+                setValue(state_func_ptr, index, 'i32')
+                args.push null
+            else
+                index = getValue(state_func_ptr, 'i32')
+                get_state = @function_map[index]
+                state_array = get_state()
+                args.push state_array
+
+
+            get_state = @function_map[index]
+            state_array = get_state()
+            # Invoke the user defined function with arguments from SQLite
+            result = step.apply(null, args)
+            state_array.splice(0, state_array.length)
+            state_array.push(...result)
+
+        wrapped_final = (cx) =>
+            state_func_ptr = _sqlite3_aggregate_context(cx, 4)
+            index = getValue(state_func_ptr, 'i32')
+
+            args = []
+
+            if index == 0
+                args.push null
+            else
+                get_state = @function_map[index]
+                state_array = get_state()
+                args.push state_array
+
+ 
+            # Invoke the user defined function with arguments from SQLite
+            result = final.apply(null, args)
+            delete @function_map[index]
+            removeFunction(index)
+
+            # Return the result of the user defined function to SQLite
+            if not result
+                sqlite3_result_null cx
+            else
+                switch typeof(result)
+                    when 'number' then sqlite3_result_double(cx, result)
+                    when 'string' then sqlite3_result_text(cx, result, -1, -1)
+
+        # Generate a pointer to the wrapped, user defined function, and register with SQLite.
+        wrap_ptr = addFunction(wrapped_step)
+ 
+        # Generate a pointer to the wrapped, user defined function, and register with SQLite.
+        final_ptr = addFunction(wrapped_final)
+        @handleError sqlite3_create_function_v2 @db, name, step.length - 1, SQLite.UTF8, 0, 0, wrap_ptr, final_ptr, 0
         return @
