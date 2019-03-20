@@ -208,7 +208,7 @@ class Statement
         @bindValue value, num+1 for value,num in values
         return true
 
-    ### Reset a statement, so that it's parameters can be bound to new values
+    ### Reset a statement, so that its parameters can be bound to new values
     It also clears all previous bindings, freeing the memory used by bound parameters.
     ###
     'reset' : ->
@@ -244,7 +244,7 @@ class Database
         @db = getValue(apiTemp, 'i32')
         RegisterExtensionFunctions(@db)
         @statements = {} # A list of all prepared statements of the database
-        @function_map = {} # A list of function pointers to functions
+        @aggregate_states = [] # Map of index to aggregate states
 
     ### Execute an SQL query, ignoring the rows it returns.
 
@@ -483,11 +483,10 @@ class Database
         return @
     
     'create_aggregate': (name, step, final) ->
-        make_state_function = ->
-            state = []
-            get_state = -> state
-
-            return get_state
+        create_state = =>
+            state_index = 1 #Reserve 0 for "null"
+            state_index++ while @aggregate_states[state_index] != undefined
+            return state_index
 
         wrapped_step = (cx, argc, argv) =>
             # Parse the args from sqlite into JS objects
@@ -510,47 +509,38 @@ class Database
                 arg = data_func(value_ptr)
                 args.push arg
                 
-            state_func_ptr = _sqlite3_aggregate_context(cx, 4)
-            index = getValue(state_func_ptr, 'i32')
+            state_index_ptr = _sqlite3_aggregate_context(cx, 4)
+            state_index = getValue(state_index_ptr, 'i32')
 
-            if index == 0
-                get_state = make_state_function()
-                index = addFunction(get_state)
-                @function_map[index] = get_state
-                setValue(state_func_ptr, index, 'i32')
+            if state_index == 0 # First time running wrapped_step
+                state_index = create_state()
+                setValue(state_index_ptr, state_index, 'i32')
                 args.push null
             else
-                index = getValue(state_func_ptr, 'i32')
-                get_state = @function_map[index]
-                state_array = get_state()
-                args.push state_array
+                state_index = getValue(state_index_ptr, 'i32')
+                args.push @aggregate_states[state_index]
+ 
 
-
-            get_state = @function_map[index]
-            state_array = get_state()
             # Invoke the user defined function with arguments from SQLite
             result = step.apply(null, args)
-            state_array.splice(0, state_array.length)
-            state_array.push(...result)
+            @aggregate_states[state_index] = result
+
 
         wrapped_final = (cx) =>
-            state_func_ptr = _sqlite3_aggregate_context(cx, 4)
-            index = getValue(state_func_ptr, 'i32')
+            state_index_ptr = _sqlite3_aggregate_context(cx, 4)
+            state_index = getValue(state_index_ptr, 'i32')
 
             args = []
 
-            if index == 0
+            if state_index == 0
                 args.push null
             else
-                get_state = @function_map[index]
-                state_array = get_state()
-                args.push state_array
+                args.push  @aggregate_states[state_index]
 
  
             # Invoke the user defined function with arguments from SQLite
             result = final.apply(null, args)
-            delete @function_map[index]
-            removeFunction(index)
+            delete @aggregate_states[state_index]
 
             # Return the result of the user defined function to SQLite
             if not result
@@ -567,3 +557,5 @@ class Database
         final_ptr = addFunction(wrapped_final)
         @handleError sqlite3_create_function_v2 @db, name, step.length - 1, SQLite.UTF8, 0, 0, wrap_ptr, final_ptr, 0
         return @
+
+    ####TODO:::
