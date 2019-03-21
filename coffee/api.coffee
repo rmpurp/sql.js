@@ -446,42 +446,67 @@ class Database
     ###
     'create_function': (name, func) ->
         wrapped_func = (cx, argc, argv) ->
-            # Parse the args from sqlite into JS objects
-            args = []
-            for i in [0...argc]
-                value_ptr = getValue(argv+(4*i), 'i32')
-                value_type = sqlite3_value_type(value_ptr)
-                data_func = switch
-                    when value_type == 1 then sqlite3_value_int
-                    when value_type == 2 then sqlite3_value_double
-                    when value_type == 3 then sqlite3_value_text
-                    when value_type == 4 then (ptr) ->
-                        size = sqlite3_value_bytes(ptr)
-                        blob_ptr = sqlite3_value_blob(ptr)
-                        blob_arg = new Uint8Array(size)
-                        blob_arg[j] = HEAP8[blob_ptr+j] for j in [0 ... size]
-                        blob_arg
-                    else (ptr) -> null
-
-                arg = data_func(value_ptr)
-                args.push arg
-
+            args = @parse_args(argc, argv)
             # Invoke the user defined function with arguments from SQLite
+        
             result = func.apply(null, args)
 
-            # Return the result of the user defined function to SQLite
-            if not result
-                sqlite3_result_null cx
-            else
-                switch typeof(result)
-                    when 'number' then sqlite3_result_double(cx, result)
-                    when 'string' then sqlite3_result_text(cx, result, -1, -1)
-
+            @return_result(cx, result)
         # Generate a pointer to the wrapped, user defined function, and register with SQLite.
         func_ptr = addFunction(wrapped_func)
         @handleError sqlite3_create_function_v2 @db, name, func.length, SQLite.UTF8, 0, func_ptr, 0, 0, 0
         return @
     
+    'return_result': (cx, result) ->
+        # Return the result of the user defined function to SQLite
+        if not result
+            sqlite3_result_null cx
+        else
+            switch typeof(result)
+                when 'number' then sqlite3_result_double(cx, result)
+                when 'string' then sqlite3_result_text(cx, result, -1, -1)
+
+    
+
+    # Parse the args from sqlite into JS objects
+    'parse_args': (argc, argv) ->
+        args = []
+        for i in [0...argc]
+            value_ptr = getValue(argv+(4*i), 'i32')
+            value_type = sqlite3_value_type(value_ptr)
+            data_func = switch
+                when value_type == 1 then sqlite3_value_int
+                when value_type == 2 then sqlite3_value_double
+                when value_type == 3 then sqlite3_value_text
+                when value_type == 4 then (ptr) ->
+                    size = sqlite3_value_bytes(ptr)
+                    blob_ptr = sqlite3_value_blob(ptr)
+                    blob_arg = new Uint8Array(size)
+                    blob_arg[j] = HEAP8[blob_ptr+j] for j in [0 ... size]
+                    blob_arg
+                else (ptr) -> null
+
+            arg = data_func(value_ptr)
+            args.push arg
+        return args
+ 
+
+     ### Register a custom aggregate with SQLite
+    @example Register a simple aggregate
+        db.create_function("mean", function(x, state) {
+            if (state == null) {
+                return [x, 1];
+            } else {
+                return [x + state[0], state[1] + 1];
+            }
+        }),
+        function(state) {return state[0];}
+        db.exec("SELECT mean(x) from tab");
+
+    @param name [String] the name of the function as referenced in SQL statements.
+    @param step [Function] the step function to be executed for each row
+    @param final [Function] the function to be called 
+    ###
     'create_aggregate': (name, step, final) ->
         create_state = =>
             state_index = 1 #Reserve 0 for "null"
@@ -490,27 +515,11 @@ class Database
 
         wrapped_step = (cx, argc, argv) =>
             # Parse the args from sqlite into JS objects
-            args = []
-            for i in [0...argc]
-                value_ptr = getValue(argv+(4*i), 'i32')
-                value_type = sqlite3_value_type(value_ptr)
-                data_func = switch
-                    when value_type == 1 then sqlite3_value_int
-                    when value_type == 2 then sqlite3_value_double
-                    when value_type == 3 then sqlite3_value_text
-                    when value_type == 4 then (ptr) ->
-                        size = sqlite3_value_bytes(ptr)
-                        blob_ptr = sqlite3_value_blob(ptr)
-                        blob_arg = new Uint8Array(size)
-                        blob_arg[j] = HEAP8[blob_ptr+j] for j in [0 ... size]
-                        blob_arg
-                    else (ptr) -> null
-
-                arg = data_func(value_ptr)
-                args.push arg
-                
+               
             state_index_ptr = _sqlite3_aggregate_context(cx, 4)
             state_index = getValue(state_index_ptr, 'i32')
+
+            args = @parse_args(argc, argv)
 
             if state_index == 0 # First time running wrapped_step
                 state_index = create_state()
@@ -541,21 +550,13 @@ class Database
             # Invoke the user defined function with arguments from SQLite
             result = final.apply(null, args)
             delete @aggregate_states[state_index]
+            # console.log(@aggregate_states.length) #TODO remove
 
-            # Return the result of the user defined function to SQLite
-            if not result
-                sqlite3_result_null cx
-            else
-                switch typeof(result)
-                    when 'number' then sqlite3_result_double(cx, result)
-                    when 'string' then sqlite3_result_text(cx, result, -1, -1)
+            @return_result(cx, result)
 
-        # Generate a pointer to the wrapped, user defined function, and register with SQLite.
         wrap_ptr = addFunction(wrapped_step)
- 
-        # Generate a pointer to the wrapped, user defined function, and register with SQLite.
         final_ptr = addFunction(wrapped_final)
+
         @handleError sqlite3_create_function_v2 @db, name, step.length - 1, SQLite.UTF8, 0, 0, wrap_ptr, final_ptr, 0
         return @
 
-    ####TODO:::
