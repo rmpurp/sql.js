@@ -244,7 +244,7 @@ class Database
         @db = getValue(apiTemp, 'i32')
         RegisterExtensionFunctions(@db)
         @statements = {} # A list of all prepared statements of the database
-        @aggregate_states = [] # Map of index to aggregate states
+        @aggregate_states = new Array(64) # Array of index to aggregate states
 
     ### Execute an SQL query, ignoring the rows it returns.
 
@@ -445,7 +445,7 @@ class Database
     @param func [Function] the actual function to be executed.
     ###
     'create_function': (name, func) ->
-        wrapped_func = (cx, argc, argv) ->
+        wrapped_func = (cx, argc, argv) => # needs to bind @
             args = @parse_args(argc, argv)
             # Invoke the user defined function with arguments from SQLite
         
@@ -456,8 +456,12 @@ class Database
         func_ptr = addFunction(wrapped_func)
         @handleError sqlite3_create_function_v2 @db, name, func.length, SQLite.UTF8, 0, func_ptr, 0, 0, 0
         return @
-    
-    'return_result': (cx, result) ->
+
+    ###
+    @private
+    @nodoc
+    ###
+    return_result: (cx, result) ->
         # Return the result of the user defined function to SQLite
         if not result
             sqlite3_result_null cx
@@ -469,7 +473,11 @@ class Database
     
 
     # Parse the args from sqlite into JS objects
-    'parse_args': (argc, argv) ->
+    ###
+    @private
+    @nodoc
+    ###
+    parse_args: (argc, argv) ->
         args = []
         for i in [0...argc]
             value_ptr = getValue(argv+(4*i), 'i32')
@@ -524,15 +532,26 @@ class Database
             if state_index == 0 # First time running wrapped_step
                 state_index = create_state()
                 setValue(state_index_ptr, state_index, 'i32')
-                args.push null
-            else
+
+                ###
+                We wrap the value in an object to distinguish unused states
+                and times when the programmer wants to deliberately have a
+                null state
+                ###
+                state_object = {
+                    value: null
+                }
+
+                @aggregate_states[state_index] = state_object
+            else # Other times: just need to fetch the state index
                 state_index = getValue(state_index_ptr, 'i32')
-                args.push @aggregate_states[state_index]
+            
+            args.push @aggregate_states[state_index].value
  
 
             # Invoke the user defined function with arguments from SQLite
             result = step.apply(null, args)
-            @aggregate_states[state_index] = result
+            @aggregate_states[state_index].value = result
 
 
         wrapped_final = (cx) =>
@@ -544,13 +563,12 @@ class Database
             if state_index == 0
                 args.push null
             else
-                args.push  @aggregate_states[state_index]
+                args.push @aggregate_states[state_index].value
 
  
             # Invoke the user defined function with arguments from SQLite
             result = final.apply(null, args)
             delete @aggregate_states[state_index]
-            # console.log(@aggregate_states.length) #TODO remove
 
             @return_result(cx, result)
 
