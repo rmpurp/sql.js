@@ -244,7 +244,7 @@ class Database
         @db = getValue(apiTemp, 'i32')
         RegisterExtensionFunctions(@db)
         @statements = {} # A list of all prepared statements of the database
-        @aggregate_states = new Array(64) # Array of index to aggregate states
+        @aggregate_states = [] # Array of index to aggregate states
 
     ### Execute an SQL query, ignoring the rows it returns.
 
